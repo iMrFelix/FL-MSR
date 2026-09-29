@@ -1,0 +1,110 @@
+# Experiment 5 — Per-layer updates, uniform importance, 6+3+1 Mbps
+#
+# Part 2: layer-routing impact at equal total bandwidth (6+3+1 = 10 Mbps).
+# Layers assigned to traffic classes by alphabetical order of var.path
+# (tie-breaking under uniform importance).
+#
+# 14 trainable variables split 5+5+4 across 3 classes:
+#
+#   Class 0 (6 Mbps) — vars 1–5 alphabetically:
+#     deep_cnn/conv_0/bias  (  256 B)  ← tiny
+#     deep_cnn/conv_0/kernel(6,912 B)  ← tiny input layer
+#     deep_cnn/conv_1/bias  (  256 B)
+#     deep_cnn/conv_1/kernel(147,456 B)
+#     deep_cnn/conv_2/bias  (  256 B)
+#     → total ≈ 155 KB  at 6 Mbps → 0.21 s
+#
+#   Class 1 (3 Mbps) — vars 6–10:
+#     deep_cnn/conv_2/kernel(147,456 B)
+#     deep_cnn/conv_3/bias  (  256 B)
+#     deep_cnn/conv_3/kernel(147,456 B)
+#     deep_cnn/conv_4/bias  (  256 B)
+#     deep_cnn/conv_4/kernel(147,456 B)
+#     → total ≈ 433 KB  at 3 Mbps → 1.16 s
+#
+#   Class 2 (1 Mbps) — vars 11–14:
+#     deep_cnn/conv_5/bias  (  256 B)
+#     deep_cnn/conv_5/kernel(147,456 B)  ← deepest layer, high gradient norm!
+#     deep_cnn/head/bias    (   40 B)
+#     deep_cnn/head/kernel  (2,560 B)
+#     → total ≈ 150 KB  at 1 Mbps → 1.20 s  ← BOTTLENECK
+#
+# Effective comm time ≈ max(0.21, 1.16, 1.20) = 1.20 s/direction
+# vs 0.59 s/direction for monolithic (exp4) — 2× slower due to the
+# deepest conv layer landing in the slowest class.
+
+federation:
+  num_nodes: 4
+  roles:
+    0: aggregator
+
+  topology:
+    edges:
+      # Worker 1 ↔ Aggregator
+      - src: 1
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 1
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 2 ↔ Aggregator
+      - src: 2
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 2
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 3 ↔ Aggregator
+      - src: 3
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 3
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+
+traffic_classes:
+  num_classes: 3
+  dscp_mapping:
+    0: 46   # EF  — highest priority
+    1: 10   # AF11
+    2: 0    # Best-effort
+
+training:
+  dataset:
+    name: cifar10
+    partition:
+      strategy: iid
+      seed: 42
+  model: deep_cnn
+  algorithm: fedavg
+  epochs_per_round: 1
+  total_rounds: 10
+  batch_size: 64
+  learning_rate: 0.01
+  optimizer: sgd
+  sync_timeout: 120.0
+  update_mode: per_layer
+  importance_metric: uniform   # alphabetical assignment → deepest layer in slow class
+
+monitoring:
+  tensorboard: true
+  tensorboard_port: 6006
+  report_output: ./results/

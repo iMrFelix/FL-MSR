@@ -1,0 +1,652 @@
+# =============================================================================
+# FedLUAR FEMNIST faithful replication
+# =============================================================================
+# Reproduces the FedLUAR FEMNIST experiment (Lee et al., "FedLUAR: Layer
+# Recycling", NeurIPS 2025) in this framework, using the framework's
+# explicitly-labelled FedLUAR-native baseline (skip_feedback=fedluar) with
+# ALL of our epsilon-coverage-deadline / QoS-shedding / aging extensions
+# DISARMED.  This is PURE FedLUAR layer recycling, isolated from our ideas.
+#
+# Each "<-- FedLUAR ..." tag cites the authoritative source for the value.
+# "[APPROX]" flags a faithfulness gap from the unreplicable list; the note
+# explains the gap and why this value is the closest faithful choice.
+#
+# ------------------------------- MODEL / DATA --------------------------------
+#   model              femnist_cnn        <-- FedLUAR Table 1 / LEAF reference.
+#                          The 4-weight-layer CNN: Conv2D(32,5x5)->MaxPool->
+#                          Conv2D(64,5x5)->MaxPool->Flatten->Dense(2048)->
+#                          Dense(62,logits).  EXACTLY 6,603,710 params
+#                          (src/models/femnist_cnn.py:61); 6.6M x 4B x 32
+#                          clients = 806.11 MiB = FedLUAR Table 1 server mem.
+#                          dense_0/kernel = 97.3% of bytes (single-dominant
+#                          -layer regime).  NOT femnist_cnn_distributed (the
+#                          1.2M-param Phase-2 redesign, which is NOT FedLUAR).
+#   dataset            femnist            <-- FEMNIST, 62-class LEAF.
+#   partition          natural            <-- PREFER CODE.  Official FedLUAR
+#                          code partitions FEMNIST by LEAF writer
+#                          (feeder_femnist.py), NOT Dirichlet, and ignores
+#                          config.alpha for FEMNIST.  The PAPER's claimed
+#                          Dirichlet(alpha=0.1) (App. A.3) contradicts the
+#                          code and is rejected by src/datasets/femnist.py.
+#   partition seed     42                 <-- reproducibility seed.
+#   max_writers        128                <-- [APPROX] code loads the first
+#                          128 LEAF writers.  Our natural partition assigns
+#                          DISJOINT whole writers; the code additionally
+#                          concatenates each client's shard with the next 9
+#                          writers' shards (10-shard overlap,
+#                          feeder_femnist.py:56-61) — that overlap is NOT
+#                          replicated (unreplicable list).
+#
+# ------------------------- FEDERATION (CLIENTS) ------------------------------
+#   num_nodes          33                 <-- [APPROX] 32 workers + 1
+#                          aggregator.  FedLUAR samples 32 of 128 clients per
+#                          round (App. A.3: num_workers=32, active_ratio=0.25).
+#                          Our framework has NO client-sampling knob (FedAvg
+#                          is FULL participation: aggregator barrier fires
+#                          only when all neighbors report).  We realise the
+#                          "32 active clients/round" as 32 always-on workers;
+#                          the 128-client pool with per-round random
+#                          32-subsampling is NOT supported (unreplicable list).
+#   clients_per_round  32 (full)          <-- realised as 32 always-on
+#                          workers.  No client_fraction/clients_per_round
+#                          field exists in the schema.
+#   aggregation        weighted FedAvg    <-- [APPROX] FedLUAR averages
+#                          UNWEIGHTED over the 32 workers (MPI allreduce SUM /
+#                          num_workers, fedluar.py:98).  Our
+#                          _aggregate_as_aggregator is SAMPLE-SIZE WEIGHTED
+#                          (n_k/N); under imbalanced natural writer shards
+#                          weighted != unweighted.  Closest no-code-change
+#                          approximation (unreplicable list).
+#
+# ------------------------------- OPTIMIZER -----------------------------------
+#   epochs_per_round   1                  <-- [APPROX] FedLUAR uses tau=20
+#                          local mini-batch STEPS/round (paper Table 6 + code
+#                          agree).  Our framework counts local EPOCHS (full
+#                          passes), not steps — there is NO local-step knob.
+#                          1 epoch over a writer's shard != 400 sample-visits
+#                          (20 steps x batch 20).  Single largest local-
+#                          compute faithfulness gap (unreplicable list).
+#   batch_size         20                 <-- FedLUAR Table 6.
+#   optimizer          sgd                <-- tf.keras.optimizers.SGD.
+#   learning_rate      0.01               <-- FedLUAR Table 6 (constant base).
+#                          The FedLUAR-matched 0.01 is correct NOW that
+#                          momentum=0.9 is actually honored by the engine
+#                          (schema field schema.py:156 -> generator flatten
+#                          generator.py:303 -> SGD plumbing engine.py:458).
+#                          Do NOT use the legacy lr=0.1 momentum-faking
+#                          compensation (that was only valid while momentum
+#                          was silently dropped).
+#   momentum           0.9                <-- FedLUAR Table 6.  Now reaches
+#                          SGD via the 3-hop fix above.
+#   weight_decay       (none)             <-- PREFER CODE effective value = 0.
+#                          Paper Table 6 + code config say 1e-4, but the
+#                          code's FEMNIST CNN never attaches the L2
+#                          regularizer (model.py:244-264) so effective L2 = 0
+#                          for FEMNIST; our engine also applies none.  No
+#                          field added — absence is correct.
+#   lr_schedule        constant 0.01      <-- [APPROX] FedLUAR step-decays
+#                          x0.1 at rounds {100,150} (lr: 0.01 -> 0.001 ->
+#                          0.0001).  No LR-schedule knob exists; constant
+#                          0.01 is the closest no-change approximation
+#                          (unreplicable list).
+#   total_rounds       200                <-- FedLUAR: 200 communication
+#                          rounds.
+#   loss               (engine-owned)     <-- engine uses
+#                          SparseCategoricalCrossentropy(from_logits=True),
+#                          numerically equivalent to the code's
+#                          CategoricalCrossentropy(from_logits=True) given
+#                          integer labels.  Head outputs logits.
+#
+# --------------------- FedLUAR RECYCLING (THE MECHANISM) ---------------------
+#   update_mode        per_layer          <-- required for layer-granular
+#                          recycling.
+#   skip_feedback      fedluar            <-- THE faithful FedLUAR mechanism
+#                          (fedavg.py:781-806).  Each round the aggregator
+#                          samples EXACTLY k layers WITHOUT replacement with
+#                          prob proportional to 1/(||Delta_l||/||theta_l||),
+#                          advises that identical set to every worker; advised
+#                          workers OMIT those layers next round; the aggregator
+#                          recycle-fills each omitted (layer,source) with
+#                          theta + last aggregated delta.  This is FedLUAR
+#                          Alg.2 / Eq.1-5 (s=||Delta||/||w||, p=recip(s)/sum,
+#                          np.random.choice(replace=False,p), prev_params +
+#                          prev_updates).  Round 1 is plain FedAvg (last_delta
+#                          is None); recycling active from round 2 — matches
+#                          the paper (R_0 empty).
+#   skip_fedluar_count 2                  <-- FedLUAR Table 16 "delta=2 of 4
+#                          layers".  The 4 recyclable layers are the 4 ndim>1
+#                          kernels (conv_0,conv_1,dense_0,head); biases
+#                          (ndim==1) are never recycled and always sent.
+#                          Code default 12 is the CIFAR/ResNet20 value and
+#                          would crash on FEMNIST (cannot draw 12 of 4); k is
+#                          clamped to L-1=3 internally so >=1 kernel always
+#                          transmits.  2 is valid.
+#   late_layer_policy  recycle_last_delta <-- recycle-fill rule: an
+#                          omitted/missing (layer,source) is filled with
+#                          local_params[layer] + last_delta[layer]
+#                          (fedavg.py:417-423,558-571 = FedLUAR Eq.3-5 stale-
+#                          delta reuse).  Under skip_feedback=fedluar the
+#                          advised omissions are recycle-filled regardless of
+#                          this policy; set explicitly for clarity.
+#
+# -------------- OUR EXTENSIONS — ALL DISARMED (NOT FedLUAR) -------------------
+#   epsilon_deadline       0.0     <-- CRITICAL.  Disables our coverage-
+#                          deadline trigger (check_coverage returns None,
+#                          engine.py:296-298); completion reverts to the COUNT
+#                          trigger (all transmitted layers in).  Neutralizes
+#                          our headline mechanism.  Layer omission then comes
+#                          ONLY from the FedLUAR skip advice.
+#   epsilon_warmup_rounds  0       <-- moot at eps=0.
+#   assignment_strategy    byte_balanced  <-- "QoS-route-but-never-drop":
+#                          head=ALL assigned layers, tail=EMPTY regardless of
+#                          eps (assignment.py:580-638, "no shedding") = the
+#                          unambiguous "all layers always sent" choice.  AVOID
+#                          coverage_eft (our min-t_eps shed scheduler).  The
+#                          only layer omission is the FedLUAR skip advice, not
+#                          assignment shedding.
+#   importance_metric_v2   delta_sq_norm  <-- frozen default; with eps=0 it
+#                          only orders layers across classes, never gates
+#                          completion.  The recycle SELECTION uses the fedluar
+#                          sampler's own ||Delta||/||theta|| ratio
+#                          (fedavg.py:797), independent of this knob.
+#   importance_metric      null    <-- legacy, ignored in per_layer mode.
+#   aging_mode             none    <-- our starvation control OFF.  Official
+#                          code has NO aging on recycle selection; FedLUAR
+#                          starvation is by-design.  Matches code AND isolates
+#                          pure FedLUAR from our extension.
+#   aging_lambda           0.0     <-- off.
+#   aging_tau_max          0       <-- off; no must-send override (code has no
+#                          staleness cap, Sec.3.3 "does not specify the upper
+#                          bound of k").
+#   watchdog_factor        0.0     <-- our G4 watchdog only fires under a live
+#                          coverage trigger; moot at eps=0.  <=0 fully
+#                          disables (engine.py:1103).
+#   cyclic_k               0       <-- N/A (only used by assignment=cyclic).
+#
+# ------------------- TRAFFIC SUBSTRATE (transport-only) ----------------------
+#   FedLUAR has NO QoS notion; the 3 traffic classes are purely our transport
+#   substrate (committed 3-class 60/30/10 Mbps topology).  Since
+#   assignment_strategy=byte_balanced never sheds and the FedLUAR skip is the
+#   only omission, multi-class routing is transport-only and does NOT alter FL
+#   semantics.  60/30/10 Mbps is 10x the DeepCNN prelim grid because the model
+#   is ~35x larger (the 24.5 MiB dense kernel drains in ~3.4 s on class 0).
+#
+# Validate (do NOT train here):
+#   python -c "from src.config.schema import load_config; \
+#       print(load_config('configs/experiments/fedluar_replication_femnist.yaml'))"
+# =============================================================================
+
+federation:
+  # 32 workers (node 1..32) + 1 aggregator (node 0) = 33.  See [APPROX] note
+  # in the header: emulates FedLUAR's 32 active clients/round via full
+  # participation (no client-sampling knob exists).
+  num_nodes: 33
+  roles:
+    0: aggregator       # nodes 1..32 default to 'worker'
+  topology:
+    # 32 bidirectional worker<->aggregator links (64 directed edges),
+    # each carrying the 3 transport-only traffic classes.
+    edges:
+      # Worker 1 <-> Aggregator (node 0)
+      - src: 1
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 1
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 2 <-> Aggregator (node 0)
+      - src: 2
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 2
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 3 <-> Aggregator (node 0)
+      - src: 3
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 3
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 4 <-> Aggregator (node 0)
+      - src: 4
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 4
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 5 <-> Aggregator (node 0)
+      - src: 5
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 5
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 6 <-> Aggregator (node 0)
+      - src: 6
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 6
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 7 <-> Aggregator (node 0)
+      - src: 7
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 7
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 8 <-> Aggregator (node 0)
+      - src: 8
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 8
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 9 <-> Aggregator (node 0)
+      - src: 9
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 9
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 10 <-> Aggregator (node 0)
+      - src: 10
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 10
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 11 <-> Aggregator (node 0)
+      - src: 11
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 11
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 12 <-> Aggregator (node 0)
+      - src: 12
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 12
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 13 <-> Aggregator (node 0)
+      - src: 13
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 13
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 14 <-> Aggregator (node 0)
+      - src: 14
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 14
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 15 <-> Aggregator (node 0)
+      - src: 15
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 15
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 16 <-> Aggregator (node 0)
+      - src: 16
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 16
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 17 <-> Aggregator (node 0)
+      - src: 17
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 17
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 18 <-> Aggregator (node 0)
+      - src: 18
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 18
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 19 <-> Aggregator (node 0)
+      - src: 19
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 19
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 20 <-> Aggregator (node 0)
+      - src: 20
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 20
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 21 <-> Aggregator (node 0)
+      - src: 21
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 21
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 22 <-> Aggregator (node 0)
+      - src: 22
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 22
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 23 <-> Aggregator (node 0)
+      - src: 23
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 23
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 24 <-> Aggregator (node 0)
+      - src: 24
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 24
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 25 <-> Aggregator (node 0)
+      - src: 25
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 25
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 26 <-> Aggregator (node 0)
+      - src: 26
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 26
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 27 <-> Aggregator (node 0)
+      - src: 27
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 27
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 28 <-> Aggregator (node 0)
+      - src: 28
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 28
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 29 <-> Aggregator (node 0)
+      - src: 29
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 29
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 30 <-> Aggregator (node 0)
+      - src: 30
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 30
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 31 <-> Aggregator (node 0)
+      - src: 31
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 31
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 32 <-> Aggregator (node 0)
+      - src: 32
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 32
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+
+traffic_classes:
+  # Transport substrate only — FedLUAR has no QoS notion (see header).
+  num_classes: 3
+  dscp_mapping:
+    0: 46   # EF
+    1: 10   # AF11
+    2: 0    # Best-effort
+
+training:
+  dataset:
+    name: femnist
+    partition:
+      strategy: natural   # PREFER CODE: LEAF per-writer non-IID (NOT Dirichlet)
+      seed: 42
+      max_writers: 132    # [APPROX] first-128-LEAF-writers; 10-shard overlap not replicated
+  model: femnist_cnn      # FedLUAR/LEAF reference CNN (6,603,710 params) — NOT femnist_cnn_distributed
+  algorithm: fedavg
+  epochs_per_round: 1     # [APPROX] FedLUAR tau=20 local STEPS; we count epochs (no step knob)
+  total_rounds: 200       # FedLUAR: 200 communication rounds
+  batch_size: 20          # FedLUAR Table 6
+  learning_rate: 0.01     # FedLUAR Table 6 (constant base; lr=0.1 compensation NO LONGER needed)
+  optimizer: sgd          # FedLUAR Table 6
+  momentum: 0.9           # FedLUAR Table 6 — now honored (schema.py:156 -> generator.py:303 -> engine.py:458)
+  update_mode: per_layer  # required for layer-granular recycling
+
+  # --- FedLUAR recycling (THE mechanism) ---
+  skip_feedback: "off"          # delta=0 plain-FedAvg baseline: recycling OFF (all layers sent every round)
+  skip_fedluar_count: 2           # FedLUAR Table 16: delta=2 of 4 kernels
+  late_layer_policy: recycle_last_delta   # theta + last aggregated delta (FedLUAR Eq.3-5)
+
+  # --- OUR extensions: ALL DISARMED (pure FedLUAR, NOT our epsilon/QoS/aging ideas) ---
+  epsilon_deadline: 0.0           # OFF: disables our coverage-deadline trigger (the headline mechanism)
+  epsilon_warmup_rounds: 0        # moot at eps=0
+  assignment_strategy: byte_balanced   # QoS-route-but-never-drop (no shedding); AVOID coverage_eft
+  importance_metric_v2: delta_sq_norm  # frozen default; does not gate completion at eps=0
+  importance_metric: null         # legacy, ignored in per_layer mode
+  aging_mode: none                # our starvation control OFF (matches code)
+  aging_lambda: 0.0               # off
+  aging_tau_max: 0                # off (code has no staleness cap)
+  watchdog_factor: 0.0            # our G4 watchdog disabled (moot at eps=0)
+  cyclic_k: 0                     # N/A (cyclic strategy unused)
+
+monitoring:
+  report_output: ./results/
+  tensorboard: false
+  tensorboard_port: 6006

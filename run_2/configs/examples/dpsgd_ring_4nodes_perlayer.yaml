@@ -1,0 +1,85 @@
+# Per-layer mode: 4-node ring with D-PSGD, gradient norm importance,
+# 2 traffic classes.  Quick test with 3 rounds.
+#
+# In per-layer mode each layer is sent as a separate protobuf message.
+# The gradient norm importance metric ranks layers by their gradient L2
+# norm, and the traffic mapper assigns the top half to class 0 (high
+# priority, DSCP EF=46) and the bottom half to class 1 (low priority,
+# DSCP AF11=10).
+#
+# With the MLP model (6 layers: 3 kernels + 3 biases), class 0 gets
+# the 3 most important layers and class 1 gets the rest.
+
+federation:
+  num_nodes: 4
+  roles: {}
+
+  topology:
+    edges:
+      - src: 0
+        dst: 1
+        classes:
+          0: { bandwidth_mbps: 1000, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 500,  latency_ms: 10, drop_rate: 0.01 }
+      - src: 1
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 1000, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 500,  latency_ms: 10, drop_rate: 0.01 }
+      - src: 1
+        dst: 2
+        classes:
+          0: { bandwidth_mbps: 1000, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 500,  latency_ms: 10, drop_rate: 0.01 }
+      - src: 2
+        dst: 1
+        classes:
+          0: { bandwidth_mbps: 1000, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 500,  latency_ms: 10, drop_rate: 0.01 }
+      - src: 2
+        dst: 3
+        classes:
+          0: { bandwidth_mbps: 1000, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 500,  latency_ms: 10, drop_rate: 0.01 }
+      - src: 3
+        dst: 2
+        classes:
+          0: { bandwidth_mbps: 1000, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 500,  latency_ms: 10, drop_rate: 0.01 }
+      - src: 3
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 1000, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 500,  latency_ms: 10, drop_rate: 0.01 }
+      - src: 0
+        dst: 3
+        classes:
+          0: { bandwidth_mbps: 1000, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 500,  latency_ms: 10, drop_rate: 0.01 }
+
+traffic_classes:
+  num_classes: 2
+  dscp_mapping:
+    0: 46   # EF (Expedited Forwarding) — highest priority
+    1: 10   # AF11 (Assured Forwarding) — lower priority
+
+training:
+  dataset:
+    name: mnist
+    partition:
+      strategy: iid
+      seed: 42
+  model: mlp
+  algorithm: dpsgd
+  epochs_per_round: 1
+  total_rounds: 3
+  batch_size: 64
+  learning_rate: 0.01
+  optimizer: sgd
+  update_mode: per_layer
+  importance_metric: gradient_norm
+
+monitoring:
+  tensorboard: true
+  tensorboard_port: 6006
+  report_output: ./results/

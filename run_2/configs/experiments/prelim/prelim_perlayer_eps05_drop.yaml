@@ -1,0 +1,126 @@
+# Prelim — Per-layer updates, gradient-norm importance, ε=0.5, drop policy
+# (Derived from exp6: 6+3+1 Mbps per-layer with gradient-norm assignment.)
+#
+# Adds: epsilon_deadline=0.5, late_layer_policy='drop'.
+# Aggressive setting: round advances once 50% importance has arrived.
+# Likely drops most class-1 (mid-importance) layers, not just class-2 tail.
+# Used when ε=0.1/0.2 are too conservative to surface a wall-clock signal
+# above Docker/tc noise.
+# See docs/experiments/01-epsilon-deadline-prelim.md.
+#
+# Original exp6 docs follow:
+# Experiment 6 — Per-layer updates, gradient-norm importance, 6+3+1 Mbps
+#
+# Part 2: layer-routing impact at equal total bandwidth (6+3+1 = 10 Mbps).
+# Layers assigned to traffic classes by gradient L2-norm (descending).
+# Deeper layers have higher gradient norms → get the fast class.
+#
+# 14 trainable variables split 5+5+4 across 3 classes:
+#
+#   Class 0 (6 Mbps) — top-5 by gradient norm (deep conv layers):
+#     deep_cnn/conv_5/kernel (147,456 B)  ← deepest, highest grad norm
+#     deep_cnn/conv_4/kernel (147,456 B)
+#     deep_cnn/conv_3/kernel (147,456 B)
+#     deep_cnn/conv_5/bias   (    256 B)
+#     deep_cnn/conv_4/bias   (    256 B)
+#     → total ≈ 443 KB  at 6 Mbps → 0.59 s
+#
+#   Class 1 (3 Mbps) — mid-5 by gradient norm:
+#     deep_cnn/conv_2/kernel (147,456 B)
+#     deep_cnn/conv_1/kernel (147,456 B)
+#     deep_cnn/conv_3/bias   (    256 B)
+#     deep_cnn/conv_2/bias   (    256 B)
+#     deep_cnn/conv_1/bias   (    256 B)
+#     → total ≈ 296 KB  at 3 Mbps → 0.79 s  ← BOTTLENECK
+#
+#   Class 2 (1 Mbps) — bottom-4 (shallow / head layers):
+#     deep_cnn/head/kernel   (  2,560 B)
+#     deep_cnn/conv_0/kernel (  6,912 B)
+#     deep_cnn/conv_0/bias   (    256 B)
+#     deep_cnn/head/bias     (     40 B)
+#     → total ≈ 10 KB   at 1 Mbps → 0.08 s
+#
+# Effective comm time ≈ max(0.59, 0.79, 0.08) = 0.79 s/direction
+# vs 0.59 s/direction for monolithic (exp4) — 35% slower but 52% faster
+# than the uniform experiment (exp5) with identical total bandwidth.
+#
+# Gradient-norm importance correctly places the large, high-impact layers in
+# the fast class, recovering most of the monolithic efficiency.
+
+federation:
+  num_nodes: 4
+  roles:
+    0: aggregator
+
+  topology:
+    edges:
+      # Worker 1 ↔ Aggregator
+      - src: 1
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 1
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 2 ↔ Aggregator
+      - src: 2
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 2
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 3 ↔ Aggregator
+      - src: 3
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 3
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+
+traffic_classes:
+  num_classes: 3
+  dscp_mapping:
+    0: 46   # EF  — highest priority
+    1: 10   # AF11
+    2: 0    # Best-effort
+
+training:
+  dataset:
+    name: cifar10
+    partition:
+      strategy: iid
+      seed: 42
+  model: deep_cnn
+  algorithm: fedavg
+  epochs_per_round: 1
+  total_rounds: 10
+  batch_size: 64
+  learning_rate: 0.01
+  optimizer: sgd
+  sync_timeout: 120.0
+  update_mode: per_layer
+  importance_metric: gradient_norm   # deep layers → class 0 (fast)
+  epsilon_deadline: 0.5              # advance round once 50% importance arrived
+  late_layer_policy: drop            # discard late arrivals (extension 03)
+
+monitoring:
+  tensorboard: true
+  tensorboard_port: 6006
+  report_output: ./results/

@@ -1,0 +1,497 @@
+diff --git a/src/algorithms/fedavg.py b/src/algorithms/fedavg.py
+index e33370f..62506fc 100644
+--- a/src/algorithms/fedavg.py
++++ b/src/algorithms/fedavg.py
+@@ -45,7 +45,7 @@ See :meth:`FedAvg._aggregate_as_aggregator`.
+ ``"off"`` the aggregator additionally produces per-sender *skip advice*
+ after every aggregation — "do not resend these layers next round" — which
+ the engine piggybacks on the model broadcast (round-tagged, fail-open,
+-idempotent; see ``proto/federation.proto:SkipAdvice``).  Two advice modes:
++idempotent; see ``proto/federation.proto:SkipAdvice``).  Four advice modes:
+ 
+ - ``"shed"``: advise each sender the layers its update was missing this
+   round (they were filled at aggregation, so resending next round buys
+@@ -57,6 +57,24 @@ idempotent; see ``proto/federation.proto:SkipAdvice``).  Two advice modes:
+   to every sender (server-side global selection, as in the paper).
+   Combined with recycle filling this reproduces FedLUAR's
+   recycling-instead-of-transmitting natively — the strongest baseline.
++- ``"fedluar_random"``: FedLUAR's own metric ablation (their Table 4
++  "Random" row).  Same fixed count, same one-global-set broadcast, same
++  recycle fill, same unbounded staleness — but the layers are drawn
++  UNIFORMLY without replacement, consulting no importance signal.  It is
++  the control that isolates the ``‖Δ_ℓ‖/‖θ_ℓ‖`` metric, and (being
++  byte-blind) its expected uplink is exactly ``(L-delta)/L`` of the model,
++  matching ``assignment_strategy="cyclic"`` at ``cyclic_k = L-delta`` in
++  expectation while differing from it in staleness (unbounded vs the
++  rotation's hard ``L/k``-round refresh).
++- ``"fedluar_cyclic"``: the control FedLUAR never ran.  Same fixed count,
++  same global set, same recycle fill, same bytes — but the skip set
++  ROTATES round-robin, so staleness is bounded for free and no ``tau_max``
++  machinery is needed.  Unlike ``assignment_strategy="cyclic"`` (which
++  omits layers from the manifest entirely, leaving the aggregator to
++  FREEZE them), this rotates through the recycle path, so
++  ``fedluar_cyclic`` vs ``cyclic`` isolates the FILL rule at matched
++  bytes — our analogue of FedLUAR's Table 5 — while ``fedluar_cyclic`` vs
++  ``fedluar`` / ``fedluar_random`` isolates the SELECTION rule.
+ 
+ Contributions missing *because they were advised away* are always
+ recycle-filled (the layer's previous aggregated delta is re-applied on the
+@@ -97,7 +115,18 @@ _SLIPPAGE_MODE_ALIASES: dict[str, str] = {
+ 
+ #: skip_feedback config literals (skip-feedback v2, plan T1).  Must match
+ #: the schema literal set; the engine validates the same values.
+-_SKIP_FEEDBACK_MODES = ("off", "shed", "fedluar")
++_SKIP_FEEDBACK_MODES = (
++    "off", "shed", "fedluar", "fedluar_random", "fedluar_cyclic",
++)
++
++#: The three fixed-count, one-global-set advice modes.  They are identical in
++#: delta, in the global broadcast, in the recycle fill and in the bytes they
++#: remove; they differ ONLY in how the delta skipped layers are chosen:
++#: inverse-ratio sampling (FedLUAR's method), uniform i.i.d. resampling
++#: (FedLUAR's own Table 4 "Random" ablation) and deterministic round-robin
++#: rotation (the bounded-staleness control FedLUAR never ran).  All three
++#: require ``skip_fedluar_count >= 1``.
++_FEDLUAR_MODES = ("fedluar", "fedluar_random", "fedluar_cyclic")
+ 
+ #: Ratio floor for the FedLUAR inverse-ratio sampling weights: a layer whose
+ #: aggregated motion is (numerically) zero gets weight 1/floor — strongly
+@@ -129,14 +158,16 @@ class FedAvg(FederationAlgorithm):
+           ``"recycle_last_delta"`` (alias ``"recycle"``).  Only the
+           aggregator acts on it; see ``_aggregate_as_aggregator``.
+         - ``skip_feedback`` (str, default ``"off"``): skip-advice mode
+-          (``"off"``, ``"shed"``, ``"fedluar"`` — module docstring).
+-          ``"renormalize"`` slippage is rejected in combination with skip
+-          feedback (semantic contradiction; module docstring).
++          (``"off"``, ``"shed"``, ``"fedluar"``, ``"fedluar_random"`` —
++          module docstring).  ``"renormalize"`` slippage is rejected in
++          combination with skip feedback (semantic contradiction; module
++          docstring).
+         - ``skip_fedluar_count`` (int, default 0): FIXED number of layers
+-          advised per round in ``"fedluar"`` mode; must be >= 1 there
+-          (clamped to L-1 at advice time so at least one layer always
+-          transmits).  Ignored by the other modes.
+-        - ``seed`` (int, default 42): seeds the fedluar sampling RNG.
++          advised per round in ``"fedluar"`` / ``"fedluar_random"`` mode;
++          must be >= 1 there (clamped to L-1 at advice time so at least one
++          layer always transmits).  Ignored by the other modes.
++        - ``seed`` (int, default 42): seeds the fedluar sampling RNG (both
++          the inverse-ratio and the uniform draw).
+     """
+ 
+     def __init__(self, node_id: str, neighbors: list[str], config: dict):
+@@ -185,10 +216,10 @@ class FedAvg(FederationAlgorithm):
+                 f"Valid values: {valid}"
+             )
+         self._skip_fedluar_count: int = int(config.get("skip_fedluar_count", 0))
+-        if self._skip_mode == "fedluar" and self._skip_fedluar_count < 1:
++        if self._skip_mode in _FEDLUAR_MODES and self._skip_fedluar_count < 1:
+             raise ValueError(
+-                "skip_feedback='fedluar' requires skip_fedluar_count >= 1 "
+-                f"(got {self._skip_fedluar_count})"
++                f"skip_feedback={self._skip_mode!r} requires "
++                f"skip_fedluar_count >= 1 (got {self._skip_fedluar_count})"
+             )
+         if self._skip_mode != "off" and self._slippage_mode == "renorm":
+             raise ValueError(
+@@ -199,6 +230,10 @@ class FedAvg(FederationAlgorithm):
+                 "recycling it (use 'drop' or 'recycle_last_delta')"
+             )
+         self._skip_rng = np.random.default_rng(int(config.get("seed", 42)))
++        #: Rotation counter for ``fedluar_cyclic`` — advanced once per
++        #: advice computation (i.e. once per aggregation), never elsewhere,
++        #: so the rotation phase is a pure function of the advice index.
++        self._skip_cycle_index: int = 0
+ 
+         # last_skip_advice: the advice produced by the most recent
+         # aggregation — {destination worker id: [layer names]} — polled by
+@@ -839,6 +874,17 @@ class FedAvg(FederationAlgorithm):
+         layers are recycle-covered; spend next round's bytes elsewhere".
+         Per-sender by construction (different senders shed differently).
+ 
++        ``fedluar_random`` mode: the metric ablation (FedLUAR Table 4
++        "Random").  Identical to ``fedluar`` in count, in the one-global-set
++        broadcast, in the recycle fill and in leaving staleness unbounded —
++        the layers are simply drawn UNIFORMLY without replacement instead of
++        inverse-ratio.  Because the draw ignores byte size, its expected
++        uplink share is exactly ``(L - delta) / L`` of the model, which is
++        what makes it byte-matched in expectation to the cyclic rotation
++        control at ``cyclic_k = L - delta``.  Any accuracy gap between
++        ``fedluar`` and ``fedluar_random`` at the same delta is attributable
++        to the ``‖Δ_ℓ‖/‖θ_ℓ‖`` metric and to nothing else.
++
+         ``fedluar`` mode: FedLUAR's server-side selection, advised
+         identically to every sender.  Exactly ``skip_fedluar_count`` layers
+         (clamped to L−1 so at least one layer always transmits) are sampled
+@@ -873,27 +919,55 @@ class FedAvg(FederationAlgorithm):
+                     advice[src] = missing
+             return advice
+ 
+-        # fedluar: inverse-ratio sampling, fixed count, one global set.
++        # fedluar / fedluar_random: fixed count, one global set, resampled
++        # every round.  The ONLY difference is the sampling distribution.
+         names = sorted(aggregated)
+         k = min(self._skip_fedluar_count, len(names) - 1)
+         if k < 1:
+             return {}
+-        last_delta = self._last_delta or {}
+-        ratios = np.empty(len(names), dtype=np.float64)
+-        for i, name in enumerate(names):
+-            delta = last_delta.get(name)
+-            delta_norm = (
+-                float(np.linalg.norm(np.asarray(delta, dtype=np.float64)))
+-                if delta is not None else 0.0
+-            )
+-            theta_norm = float(
+-                np.linalg.norm(np.asarray(aggregated[name], dtype=np.float64))
++        if self._skip_mode == "fedluar_cyclic":
++            # The control FedLUAR never ran: a deterministic round-robin
++            # skip set.  Same delta, same global set, same recycle fill and
++            # the same expected bytes as fedluar_random — but staleness is
++            # BOUNDED for free: over ceil(L / gcd(L, delta)) advice rounds
++            # every layer is skipped exactly delta / L of the time and its
++            # consecutive-skip run is bounded, with no tau_max machinery.
++            # FedLUAR's Table 4 tests only i.i.d. uniform "Random", so this
++            # row does not exist in the paper.
++            index = self._skip_cycle_index
++            self._skip_cycle_index += 1
++            start = (index * k) % len(names)
++            layers = sorted(
++                names[(start + i) % len(names)] for i in range(k)
+             )
+-            ratios[i] = delta_norm / max(theta_norm, _FEDLUAR_RATIO_FLOOR)
+-        weights = 1.0 / np.maximum(ratios, _FEDLUAR_RATIO_FLOOR)
+-        if not np.all(np.isfinite(weights)) or weights.sum() <= 0.0:
+-            weights = np.ones(len(names), dtype=np.float64)
+-        probabilities = weights / weights.sum()
++            return {src: list(layers) for src in workers}
++        if self._skip_mode == "fedluar_random":
++            # FedLUAR Table 4 "Random": i.i.d. uniform resampling of delta
++            # layers each round.  No importance signal is consulted at all —
++            # this is the metric-ablation control, byte-matched IN
++            # EXPECTATION to fedluar at the same delta and matched exactly in
++            # count.  Staleness stays unbounded (same family as fedluar),
++            # which is what separates it from the cyclic rotation control.
++            probabilities = None
++        else:
++            last_delta = self._last_delta or {}
++            ratios = np.empty(len(names), dtype=np.float64)
++            for i, name in enumerate(names):
++                delta = last_delta.get(name)
++                delta_norm = (
++                    float(np.linalg.norm(np.asarray(delta, dtype=np.float64)))
++                    if delta is not None else 0.0
++                )
++                theta_norm = float(
++                    np.linalg.norm(
++                        np.asarray(aggregated[name], dtype=np.float64)
++                    )
++                )
++                ratios[i] = delta_norm / max(theta_norm, _FEDLUAR_RATIO_FLOOR)
++            weights = 1.0 / np.maximum(ratios, _FEDLUAR_RATIO_FLOOR)
++            if not np.all(np.isfinite(weights)) or weights.sum() <= 0.0:
++                weights = np.ones(len(names), dtype=np.float64)
++            probabilities = weights / weights.sum()
+         chosen = self._skip_rng.choice(
+             len(names), size=k, replace=False, p=probabilities,
+         )
+diff --git a/src/config/schema.py b/src/config/schema.py
+index 949e0be..12abb98 100644
+--- a/src/config/schema.py
++++ b/src/config/schema.py
+@@ -436,7 +436,9 @@ class TrainingConfig(BaseModel):
+             "pure coverage trigger.  Values <= 0 disable the watchdog."
+         ),
+     )
+-    skip_feedback: Literal["off", "shed", "fedluar"] = Field(
++    skip_feedback: Literal[
++        "off", "shed", "fedluar", "fedluar_random", "fedluar_cyclic"
++    ] = Field(
+         default="off",
+         description=(
+             "Skip-feedback v2 (sender omission, writeup/04-phase1/plan.md "
+@@ -446,7 +448,15 @@ class TrainingConfig(BaseModel):
+             "covered-by-recycling).  'shed' advises each sender its missing "
+             "layers; 'fedluar' advises a fixed count sampled "
+             "inverse-ratio (the FedLUAR-native baseline, requires "
+-            "skip_fedluar_count >= 1).  Incompatible with "
++            "skip_fedluar_count >= 1); 'fedluar_random' is FedLUAR's own "
++            "metric ablation (their Table 4 'Random') — same fixed count, "
++            "same global set, same recycle fill, same unbounded staleness, "
++            "but drawn UNIFORMLY, so any gap to 'fedluar' is attributable "
++            "to the importance metric alone; 'fedluar_cyclic' is the "
++            "control FedLUAR never ran — the same fixed count rotated "
++            "ROUND-ROBIN, which bounds staleness for free (no tau_max) at "
++            "the same expected bytes.  All three fedluar* modes require "
++            "skip_fedluar_count >= 1.  Incompatible with "
+             "late_layer_policy='renormalize'."
+         ),
+     )
+@@ -455,8 +465,8 @@ class TrainingConfig(BaseModel):
+         ge=0,
+         description=(
+             "Fixed number of layers advised per round by "
+-            "skip_feedback='fedluar' (clamped to L-1 at advice time).  "
+-            "Must be >= 1 in fedluar mode; ignored by the other modes."
++            "skip_feedback='fedluar' or 'fedluar_random' (clamped to L-1 at "
++            "advice time).  Must be >= 1 in those modes; ignored otherwise."
+         ),
+     )
+ 
+@@ -478,9 +488,15 @@ class TrainingConfig(BaseModel):
+         # Skip-feedback v2 (plan T1).  FedAvg fails fast on both conditions
+         # at construction; validating here as well moves the failure to
+         # config-load time (before any container starts).
+-        if self.skip_feedback == "fedluar" and self.skip_fedluar_count < 1:
++        if (
++            self.skip_feedback in (
++                "fedluar", "fedluar_random", "fedluar_cyclic",
++            )
++            and self.skip_fedluar_count < 1
++        ):
+             raise ValueError(
+-                "skip_feedback='fedluar' requires skip_fedluar_count >= 1 "
++                f"skip_feedback={self.skip_feedback!r} requires "
++                "skip_fedluar_count >= 1 "
+                 f"(got skip_fedluar_count={self.skip_fedluar_count})."
+             )
+         if (
+diff --git a/src/training/engine.py b/src/training/engine.py
+index 1c59e0a..d3d5c91 100644
+--- a/src/training/engine.py
++++ b/src/training/engine.py
+@@ -599,10 +599,13 @@ class TrainingEngine:
+         self.skip_feedback_mode: str = (
+             config.get("skip_feedback", "off") or "off"
+         )
+-        if self.skip_feedback_mode not in ("off", "shed", "fedluar"):
++        if self.skip_feedback_mode not in (
++            "off", "shed", "fedluar", "fedluar_random", "fedluar_cyclic",
++        ):
+             raise ValueError(
+                 f"Unknown skip_feedback {self.skip_feedback_mode!r}. "
+-                f"Valid values: off, shed, fedluar"
++                "Valid values: off, shed, fedluar, fedluar_random, "
++                "fedluar_cyclic"
+             )
+         # advice round (the round whose aggregation produced it) -> layers.
+         self._skip_advice: dict[int, frozenset[str]] = {}
+diff --git a/tests/test_skip_feedback.py b/tests/test_skip_feedback.py
+index fad3977..aa6f3c8 100644
+--- a/tests/test_skip_feedback.py
++++ b/tests/test_skip_feedback.py
+@@ -671,6 +671,20 @@ class TestFedAvgSkipConfig:
+         with pytest.raises(ValueError, match="skip_fedluar_count"):
+             FedAvg("node-0", ["node-1"], _agg_config(skip_feedback="fedluar"))
+ 
++    def test_fedluar_random_requires_count(self):
++        with pytest.raises(ValueError, match="skip_fedluar_count"):
++            FedAvg(
++                "node-0", ["node-1"],
++                _agg_config(skip_feedback="fedluar_random"),
++            )
++
++    def test_fedluar_cyclic_requires_count(self):
++        with pytest.raises(ValueError, match="skip_fedluar_count"):
++            FedAvg(
++                "node-0", ["node-1"],
++                _agg_config(skip_feedback="fedluar_cyclic"),
++            )
++
+     def test_renorm_combination_rejected(self):
+         with pytest.raises(ValueError, match="renorm"):
+             FedAvg(
+@@ -770,6 +784,157 @@ class TestFedLUARAdviceGeneration:
+         assert len(algorithm.last_skip_advice["node-1"]) == 2  # L - 1
+ 
+ 
++class TestFedLUARRandomAdviceGeneration:
++    """FedLUAR's own metric ablation (their Table 4 'Random').
++
++    Same fixed count, same one-global-set broadcast, same recycle fill,
++    same unbounded staleness as ``fedluar`` — the ONLY difference is that
++    the draw is uniform.  These tests pin exactly that: the mode must keep
++    every structural property of ``fedluar`` while demonstrably NOT
++    consulting the importance metric.
++    """
++
++    async def _one_round_advice(self, seed: int, count: int = 1
++                                ) -> dict[str, list[str]]:
++        """Same fixture as TestFedLUARAdviceGeneration: 'frozen' has zero
++        motion (ratio 0 → the inverse-ratio rule would take it almost
++        always), x/y/z move equally."""
++        algorithm = FedAvg(
++            "node-0", ["node-1", "node-2"],
++            _agg_config(
++                skip_feedback="fedluar_random",
++                skip_fedluar_count=count,
++                seed=seed,
++            ),
++        )
++        local = {
++            "frozen": np.ones(4), "x": np.zeros(4),
++            "y": np.zeros(4), "z": np.zeros(4),
++        }
++        sent = {
++            "frozen": np.ones(4), "x": np.ones(4),
++            "y": np.ones(4), "z": np.ones(4),
++        }
++        for source in ("node-1", "node-2"):
++            await algorithm.on_update_received(_update(source, 0, sent))
++        await algorithm.aggregate(local)
++        return algorithm.last_skip_advice
++
++    async def test_fixed_count_and_global_set(self):
++        advice = await self._one_round_advice(seed=3, count=2)
++        assert set(advice) == {"node-1", "node-2"}
++        assert advice["node-1"] == advice["node-2"]   # one global set
++        assert len(advice["node-1"]) == 2             # exactly `count`
++
++    async def test_uniform_draw_ignores_the_importance_metric(self):
++        """The whole point of the control: the zero-motion layer must NOT
++        be preferred.  Under ``fedluar`` its share is >= 0.95 (see
++        TestFedLUARAdviceGeneration); under uniform sampling of 1 of 4 it
++        must sit near 0.25, and every layer must be reachable."""
++        chosen: list[str] = []
++        for seed in range(200):
++            advice = await self._one_round_advice(seed)
++            chosen.extend(advice["node-1"])
++        frozen_share = chosen.count("frozen") / len(chosen)
++        assert 0.15 <= frozen_share <= 0.35, frozen_share
++        assert set(chosen) == {"frozen", "x", "y", "z"}
++
++    async def test_count_clamped_to_leave_one_transmitted(self):
++        algorithm = FedAvg(
++            "node-0", ["node-1"],
++            _agg_config(
++                skip_feedback="fedluar_random", skip_fedluar_count=10, seed=1,
++            ),
++        )
++        local = {"a": np.zeros(2), "b": np.zeros(2), "c": np.zeros(2)}
++        await algorithm.on_update_received(
++            _update("node-1", 0, {k: np.ones(2) for k in local})
++        )
++        await algorithm.aggregate(local)
++        assert len(algorithm.last_skip_advice["node-1"]) == 2  # L - 1
++
++
++class TestFedLUARCyclicAdviceGeneration:
++    """The bounded-staleness rotation control FedLUAR never ran.
++
++    Same delta, same one-global-set broadcast, same recycle fill as
++    ``fedluar``/``fedluar_random`` — the skip set simply rotates.  The
++    property that earns the arm its place in the campaign is the one tested
++    last: every layer is refreshed within a bounded number of rounds, with
++    no ``aging_tau_max`` machinery anywhere.
++    """
++
++    async def _advice_sequence(self, rounds: int, count: int,
++                               layers: tuple[str, ...]) -> list[list[str]]:
++        algorithm = FedAvg(
++            "node-0", ["node-1", "node-2"],
++            _agg_config(
++                skip_feedback="fedluar_cyclic",
++                skip_fedluar_count=count,
++                seed=11,
++            ),
++        )
++        state = {name: np.zeros(4) for name in layers}
++        sent = {name: np.ones(4) for name in layers}
++        seq: list[list[str]] = []
++        for rnd in range(rounds):
++            if rnd:
++                algorithm.advance_round()
++            for source in ("node-1", "node-2"):
++                await algorithm.on_update_received(_update(source, rnd, sent))
++            state = await algorithm.aggregate(state)
++            seq.append(list(algorithm.last_skip_advice["node-1"]))
++        return seq
++
++    async def test_fixed_count_and_global_set(self):
++        algorithm = FedAvg(
++            "node-0", ["node-1", "node-2"],
++            _agg_config(
++                skip_feedback="fedluar_cyclic", skip_fedluar_count=2, seed=5,
++            ),
++        )
++        local = {k: np.zeros(4) for k in ("a", "b", "c", "d", "e")}
++        for source in ("node-1", "node-2"):
++            await algorithm.on_update_received(
++                _update(source, 0, {k: np.ones(4) for k in local})
++            )
++        await algorithm.aggregate(local)
++        advice = algorithm.last_skip_advice
++        assert advice["node-1"] == advice["node-2"]   # one global set
++        assert len(advice["node-1"]) == 2             # exactly `count`
++
++    async def test_rotation_is_deterministic_and_seed_independent(self):
++        """No RNG is consulted, so two different seeds give the same
++        schedule — the property that separates this from fedluar_random."""
++        layers = ("a", "b", "c", "d", "e")
++        first = await self._advice_sequence(4, 2, layers)
++        assert first == [["a", "b"], ["c", "d"], ["a", "e"], ["b", "c"]]
++
++    async def test_staleness_is_bounded_without_any_aging_knob(self):
++        """Over a full rotation every layer is skipped exactly delta/L of
++        the rounds, and no layer is ever skipped for an unbounded run —
++        the guarantee FedLUAR explicitly declines to make (§3.3: 'does not
++        specify the upper bound of k')."""
++        layers = tuple("abcdefg")          # L = 7
++        count, rounds = 2, 14              # two full rotations
++        seq = await self._advice_sequence(rounds, count, layers)
++        skips = {name: 0 for name in layers}
++        longest_run = {name: 0 for name in layers}
++        run = {name: 0 for name in layers}
++        for advised in seq:
++            for name in layers:
++                if name in advised:
++                    skips[name] += 1
++                    run[name] += 1
++                    longest_run[name] = max(longest_run[name], run[name])
++                else:
++                    run[name] = 0
++        # Perfectly even coverage: 14 rounds x 2 skips / 7 layers = 4 each.
++        assert set(skips.values()) == {rounds * count // len(layers)}
++        # And nobody starves: the consecutive-skip run is tiny and bounded.
++        assert max(longest_run.values()) <= 2, longest_run
++
++
+ class TestAdvisedRecycleFill:
+ 
+     async def test_advised_miss_recycled_under_drop_policy(self):
+@@ -1022,14 +1187,24 @@ def _smoke_model() -> tf.Module:
+ 
+ class TestWireSmokeTwoRounds:
+ 
+-    async def test_two_round_smoke_advice_bytes_accuracy(self):
++    @pytest.mark.parametrize(
++        "skip_mode", ["fedluar", "fedluar_random", "fedluar_cyclic"],
++    )
++    async def test_two_round_smoke_advice_bytes_accuracy(self, skip_mode):
+         """Plan T1 VALIDATE (b), in-process variant: 2 rounds, FedAvg
+         star (1 aggregator + 2 workers), per-layer, skip_feedback=fedluar
+         (count=1), recycle slippage, ε=0.2.  Asserts: (i) skip advice
+         observed on the wire and in telemetry; (ii) the advised layer's
+         bytes are actually absent in round 1 (sender comm metrics,
+         receiver telemetry, and total bytes drop) while the manifest still
+-        lists every layer; (iii) accuracy stays sane."""
++        lists every layer; (iii) accuracy stays sane.
++
++        Parameterized over all three fixed-count modes: the campaign's
++        head-to-head is only meaningful if `fedluar_random` and
++        `fedluar_cyclic` remove the SAME bytes on the SAME path as
++        `fedluar` — a control that advised a layer but still shipped it
++        would silently be byte-matched to nothing.
++        """
+         training = {
+             "learning_rate": 0.3,
+             "optimizer": "sgd",
+@@ -1044,7 +1219,7 @@ class TestWireSmokeTwoRounds:
+             "importance_metric_v2": "delta_sq_norm",
+             "assignment_strategy": "byte_balanced",
+             "late_layer_policy": "recycle_last_delta",
+-            "skip_feedback": "fedluar",
++            "skip_feedback": skip_mode,
+             "skip_fedluar_count": 1,
+             "sync_timeout": 30.0,
+             "seed": 7,

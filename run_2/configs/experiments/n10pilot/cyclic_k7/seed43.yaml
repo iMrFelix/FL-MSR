@@ -1,0 +1,106 @@
+federation:
+  num_nodes: 10
+  roles:
+    0: aggregator
+  topology:
+    edges:
+    - src: 1
+      dst: 0
+      classes: &id001
+        0:
+          bandwidth_mbps: 6
+          latency_ms: 5
+          drop_rate: 0.0
+        1:
+          bandwidth_mbps: 3
+          latency_ms: 5
+          drop_rate: 0.0
+        2:
+          bandwidth_mbps: 1
+          latency_ms: 5
+          drop_rate: 0.0
+    - src: 0
+      dst: 1
+      classes: *id001
+    - src: 2
+      dst: 0
+      classes: *id001
+    - src: 0
+      dst: 2
+      classes: *id001
+    - src: 3
+      dst: 0
+      classes: *id001
+    - src: 0
+      dst: 3
+      classes: *id001
+    - src: 4
+      dst: 0
+      classes: *id001
+    - src: 0
+      dst: 4
+      classes: *id001
+    - src: 5
+      dst: 0
+      classes: *id001
+    - src: 0
+      dst: 5
+      classes: *id001
+    - src: 6
+      dst: 0
+      classes: *id001
+    - src: 0
+      dst: 6
+      classes: *id001
+    - src: 7
+      dst: 0
+      classes: *id001
+    - src: 0
+      dst: 7
+      classes: *id001
+    - src: 8
+      dst: 0
+      classes: *id001
+    - src: 0
+      dst: 8
+      classes: *id001
+    - src: 9
+      dst: 0
+      classes: *id001
+    - src: 0
+      dst: 9
+      classes: *id001
+traffic_classes:
+  num_classes: 3
+  dscp_mapping:
+    0: 46
+    1: 10
+    2: 0
+training:
+  dataset:
+    name: cifar10
+    partition:
+      strategy: dirichlet
+      alpha: 0.1
+      seed: 43
+  model: deep_cnn
+  algorithm: fedavg
+  epochs_per_round: 1
+  total_rounds: 20
+  batch_size: 64
+  learning_rate: 0.1
+  optimizer: sgd
+  momentum: 0.0
+  global_eval: true
+  update_mode: per_layer
+  epsilon_warmup_rounds: 0
+  importance_metric_v2: delta_sq_norm
+  late_layer_policy: drop
+  aging_mode: none
+  watchdog_factor: 3.0
+  epsilon_deadline: 0.0
+  assignment_strategy: cyclic
+  cyclic_k: 7
+monitoring:
+  tensorboard: false
+  report_output: ./results/

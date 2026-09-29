@@ -1,0 +1,9 @@
+concurrent	1	fedluar_d7	41	configs/experiments/fedluar_late/fedluar_d7/seed41.yaml
+concurrent	1	luarand_d7	41	configs/experiments/fedluar_late/luarand_d7/seed41.yaml
+concurrent	1	luarcyc_d7	41	configs/experiments/fedluar_late/luarcyc_d7/seed41.yaml
+concurrent	1	fedluar_d7	42	configs/experiments/fedluar_late/fedluar_d7/seed42.yaml
+concurrent	1	luarand_d7	42	configs/experiments/fedluar_late/luarand_d7/seed42.yaml
+concurrent	1	luarcyc_d7	42	configs/experiments/fedluar_late/luarcyc_d7/seed42.yaml
+concurrent	1	fedluar_d7	43	configs/experiments/fedluar_late/fedluar_d7/seed43.yaml
+concurrent	1	luarand_d7	43	configs/experiments/fedluar_late/luarand_d7/seed43.yaml
+concurrent	1	luarcyc_d7	43	configs/experiments/fedluar_late/luarcyc_d7/seed43.yaml

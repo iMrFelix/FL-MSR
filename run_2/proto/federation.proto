@@ -1,0 +1,294 @@
+syntax = "proto3";
+package federation;
+
+// --- Envelope ---
+// Every message on the wire is wrapped in an Envelope.
+message Envelope {
+  string source_node = 1;     // e.g. "node-0"
+  string dest_node = 2;       // e.g. "node-1"
+  // Sender's CLOCK_MONOTONIC at *serialization* time (nanoseconds).  NOT a
+  // transmission stamp: an envelope may sit in a per-class send queue for an
+  // unbounded time after being serialized.  Use t_send_start_sender_s below
+  // for any timing arithmetic.
+  uint64 timestamp_ns = 3;
+  // Sender's CLOCK_MONOTONIC (seconds), stamped immediately before this
+  // envelope's first byte is handed to its class socket (audit NT-01/NT-05).
+  // Set by ConnectionPool.send, i.e. after the per-class queue wait and
+  // after any preceding envelope on the same socket has been accepted.
+  //
+  // Every container in the testbed shares the host kernel, so CLOCK_MONOTONIC
+  // is one clock across nodes: a receiver may subtract this from its own
+  // time.monotonic() arrival stamp to obtain a TRUE one-way wire time
+  // (telemetry suffix `_oneway_s`).  0.0 means "not stamped" — an envelope
+  // from a pre-fix sender, or one never routed through ConnectionPool.send;
+  // receivers MUST treat 0.0 as absent rather than as an epoch.  A negative
+  // one-way result proves the two ends are not on one clock and is counted
+  // as a clock anomaly rather than reported as a time.
+  double t_send_start_sender_s = 4;
+
+  oneof payload {
+    ModelUpdate model_update = 10;
+    LayerUpdate layer_update = 11;
+    SyncBarrier sync_barrier = 12;
+    MetricsReport metrics_report = 13;
+    ControlSignal control_signal = 14;
+    RoundManifest round_manifest = 15;
+    SkipAdvice skip_advice = 16;
+  }
+}
+
+// --- Model Updates ---
+// Monolithic: entire model sent as one message.
+message ModelUpdate {
+  bytes parameters = 1;       // Serialized numpy arrays (all layers concatenated)
+  int64 num_samples = 2;      // Number of training samples used (for weighted averaging)
+  uint32 round = 3;
+  // Metadata for reconstruction
+  repeated LayerMeta layer_meta = 4;
+}
+
+message LayerMeta {
+  string name = 1;            // e.g. "dense_0/kernel:0"
+  repeated int32 shape = 2;   // e.g. [784, 200]
+  string dtype = 3;           // e.g. "float32"
+  uint64 offset = 4;          // Byte offset into ModelUpdate.parameters
+  uint64 size = 5;            // Byte size of this layer in the buffer
+}
+
+// Per-layer: one message per layer.
+message LayerUpdate {
+  string layer_name = 1;      // e.g. "dense_0/kernel:0"
+  bytes parameters = 2;       // Serialized numpy array for this single layer
+  repeated int32 shape = 3;
+  string dtype = 4;
+  uint32 layer_index = 5;     // 0-based index in the model
+  uint32 total_layers = 6;    // Total number of layers in the full update
+  int64 num_samples = 7;
+  uint32 round = 8;
+  float importance = 9;       // Importance score assigned to this layer
+  uint32 traffic_class = 10;  // The traffic class this layer was assigned to
+}
+
+// --- Importance Manifest (ImpRoute) ---
+// Sent by a node at the start of its outbound update for a round, before
+// any LayerUpdate payloads.  Carries the full per-layer importance
+// distribution so the receiver can compute the absolute ε-threshold
+// (1-ε)·Σ raw_score for ε-deadline-driven round completion.
+//
+// Invariants:
+//   - sent on the highest-priority traffic class (class 0)
+//   - sent before any LayerUpdate from the same (round, source_node_id)
+//   - `entries` covers every layer the sender will transmit this round,
+//     PLUS every layer the sender deliberately omits on skip advice
+//     (flagged `skipped` — skip-feedback v2, writeup/04-phase1/plan.md T1)
+//   - all `raw_score` are non-negative; scores are NOT normalised on wire
+//     (receiver computes total itself).  See docs/decisions/0003.
+//   - at least one entry is NOT `skipped` (something must be on the wire
+//     for the flow to complete without a watchdog)
+message ImportanceEntry {
+  string layer_name   = 1;
+  float  raw_score    = 2;   // non-negative; whatever the importance metric produces
+  bool   must_receive = 3;   // if true, blocks round completion regardless of ε
+  // Scheduling-variant score (gate ruling G2, writeup/01-candidate-selection.md).
+  // `raw_score` is FROZEN as the ε-trigger accounting metric for ALL arms
+  // (delta-sq-norm) so that the same ε means the same coverage threshold
+  // across experiments.  Scheduling variants (relative, snr-reweight, aged
+  // scores, ...) express their preference here instead; the receiver's
+  // trigger never reads this field.  0.0 when the scheduling score equals
+  // the trigger score (single-metric arms).
+  float  sched_score  = 4;
+  // Skip-feedback v2 (sender omission, writeup/01-candidate-selection.md §4
+  // v2 re-spec): true marks a layer the sender deliberately omits this
+  // round on aggregator skip advice.  The entry stays manifest-listed with
+  // its full trigger-mass `raw_score`, and the receiver's ε-trigger counts
+  // that mass as covered-by-recycling (the aggregator re-applies the
+  // layer's previous aggregated delta on the sender's behalf).  Keeping the
+  // mass in the denominator AND crediting it as covered is what kills the
+  // v1 coverage-denominator ratchet: each skip round sheds ε of the FULL
+  // utility mass, never of a shrinking one.  A skipped entry must never be
+  // must_receive (validated; aging overrides skip upstream — a layer at
+  // age >= tau_max is promoted to must_receive and its skip is suppressed).
+  bool   skipped      = 5;
+}
+
+message RoundManifest {
+  int32                    round           = 1;
+  string                   source_node_id  = 2;
+  repeated ImportanceEntry entries         = 3;
+}
+
+// --- Skip advice (skip-feedback v2, writeup/04-phase1/plan.md T1) ---
+// Piggybacked by the aggregator on its model broadcast: sent per
+// destination on traffic class 0 immediately BEFORE the broadcast payload
+// (same socket, FIFO), carrying the layers that destination is advised to
+// omit from its NEXT uplink round.  Contract:
+//   - round-tagged: `round` is the aggregation round that produced the
+//     advice; the receiving sender applies it to round `round + 1` ONLY.
+//     Older advice is never accumulated or re-applied (stale tags are
+//     simply ignored).
+//   - fail-open: advice is advisory.  A sender that never receives it (or
+//     runs with skip_feedback=off) transmits everything; an arrived layer
+//     that was advised away is aggregated normally.  Loss of this message
+//     can only cost bytes, never correctness.
+//   - idempotent: re-delivery overwrites the same (round -> layers) slot;
+//     applying the advice twice yields the same omission set.
+// Advised layers REMAIN listed in the sender's RoundManifest with their
+// trigger mass, flagged `skipped` (see ImportanceEntry.skipped), so the
+// coverage denominator never shrinks.  The aggregator recycle-fills the
+// advised layers at aggregation (FedLUAR-style re-application of the
+// previous aggregated delta).
+//
+// The same envelope also carries the REALIZED INCLUSION ACK (audit
+// TRIG-1/ML-01): which of the destination's own layers actually entered the
+// aggregate in round `round`, read off the aggregator's per-layer
+// `arrived_sources`.  It rides here because this is the only per-destination,
+// round-tagged downlink message that already precedes the broadcast, and the
+// sender needs it before planning round `round + 1`.  The ack is what the
+// τ_max staleness counter is keyed to: head placement is a sender scheduling
+// decision that carries no delivery guarantee, so resetting an age on it
+// bounds nothing (the layer can be head-placed every round and shed at the
+// receiver every round).  Ack semantics:
+//   - `inclusion_ack` distinguishes "this envelope carries an authoritative
+//     ack" from "no ack" — an EMPTY `included_layers` with inclusion_ack=true
+//     is the meaningful statement "none of your layers made it", which a
+//     repeated field alone cannot express.
+//   - `included_layers` lists that destination's layers whose fresh value
+//     entered the aggregate; every other layer of the sender ages by one.
+//   - fail-safe (not fail-open, unlike the advice half): a sender that has
+//     seen acks before but misses one ages every layer for that round rather
+//     than resetting on an unverified proxy.
+message SkipAdvice {
+  uint32 round = 1;                 // producing aggregation round; applies to round+1
+  repeated string layer_names = 2;  // layers advised for omission
+  bool inclusion_ack = 3;           // included_layers is authoritative for `round`
+  repeated string included_layers = 4;  // sender layers that entered the aggregate
+}
+
+// --- Synchronization ---
+message SyncBarrier {
+  enum Action {
+    ROUND_READY = 0;          // "I have finished local training for this round"
+    ROUND_COMPLETE = 1;       // "I have aggregated and am ready for the next round"
+  }
+  Action action = 1;
+  uint32 round = 2;
+}
+
+// --- Monitoring ---
+message MetricsReport {
+  string node_id = 1;
+  uint32 round = 2;
+  float train_loss = 3;
+  float train_accuracy = 4;
+  float val_loss = 5;
+  float val_accuracy = 6;
+  float round_duration_s = 7;
+  float train_duration_s = 8;
+  float comm_duration_s = 9;
+  float aggregation_duration_s = 10;
+  float learning_rate = 11;
+  // Per-layer timing (for per-layer mode)
+  repeated LayerCommMetric layer_comm_metrics = 12;
+  // comm_duration_s decomposed: this field is the time _send_updates spent
+  // waiting for the KERNEL TO ACCEPT the outbound bytes,
+  // barrier_wait_duration_s is the time spent blocked in
+  // wait_for_aggregation (idle, gated by the slowest peer).
+  // comm_duration_s == this + barrier_wait_duration_s.  Split out because the
+  // conflated comm_duration_s was ~93% barrier wait, masking the send cost.
+  // See docs/experiments/02-send-perf.md.
+  //
+  // MEASUREMENT WARNING (audit NT-01): `sock_sendall` returns at socket-buffer
+  // accept, not at wire departure, so this is an ENQUEUE duration in the
+  // SENDER clock domain — never transmission time.  Whenever the payload fits
+  // inside SO_SNDBUF it degenerates into a memcpy timer and understates the
+  // wire by up to ~100x, and its bias is arm-dependent because SO_SNDBUF is
+  // pinned per class bandwidth (NT-08/BYTE-08).  The field NAME AND NUMBER are
+  // frozen for wire compatibility only; every consumer exports it under its
+  // true name, `send_enqueue_duration_sender_s`.  Wire truth lives in
+  // uplink_telemetry_json: the `_oneway_s` one-way stamps and t_eps.
+  float send_duration_s = 13;
+  float barrier_wait_duration_s = 14;
+  // Receiver-side uplink telemetry sidecar (pre-run fix 1,
+  // writeup/01-candidate-selection.md §3).  JSON-encoded, schema-light by
+  // design: analysis scripts parse it, the monitor stores it verbatim.
+  // Empty string when the reporting node received no per-layer uplink
+  // traffic this round (workers under FedAvg, monolithic mode).
+  //
+  // CLOCK-DOMAIN RULE (audit NT-03): every time-valued key carries a domain
+  // suffix, and two keys with different suffixes may never be put on one
+  // axis.  `_receiver_s` = receiver-local monotonic offset relative to the
+  // receiver's round-start instant (gate ruling G1); `_sender_s` =
+  // sender-local monotonic interval; `_oneway_s` = receiver stamp minus the
+  // sender's Envelope.t_send_start_sender_s, i.e. a TRUE one-way wire time,
+  // valid because every container shares the host kernel's CLOCK_MONOTONIC.
+  //
+  // Schema (one entry per sender observed this round):
+  //   {
+  //     "<source_node_id>": {
+  //       "manifest_arrival_rel_receiver_s": float,       // manifest arrival offset
+  //       "trigger_fire_rel_receiver_s":     float|null,  // ε-trigger fire offset; null if never fired
+  //       "watchdog_fired":                  bool,        // T_max watchdog forced completion (G4)
+  //       "t_eps_local_receiver_s":          float|null,  // trigger_fire − manifest_arrival (primary t_ε KPI)
+  //       "layer_arrivals_rel_receiver_s":   {"<layer>": float},  // per-layer arrival offsets
+  //       "manifest_wire_time_oneway_s":     float|null,  // manifest send-start -> arrival
+  //       "layer_wire_times_oneway_s":       {"<layer>": float},  // per-layer send-start -> arrival
+  //       "t_cover_oneway_s":                float|null,  // manifest send-start -> ε-trigger fire
+  //       "wire_clock_anomaly":              bool,        // a one-way value came out negative
+  //       "shed_layers":                     [str],       // manifest layers absent at completion
+  //       "kappa_realized":                  float|null,  // TOTAL shed mass — unchanged meaning
+  //       "kappa_slip":                      float|null,  // COVERAGE SLIPPAGE only; the ε quantity (TRIG-2/BYTE-04)
+  //       "shed_mass_fraction":              float|null,  // DELIBERATELY omitted mass (skip-advised)
+  //                                                       // kappa_realized == kappa_slip + shed_mass_fraction
+  //       "ordering_violation":              bool         // any payload arrived before its manifest
+  //     }, ...
+  //   }
+  //
+  // Reserved underscore blocks (consumers iterating senders must skip them):
+  //   "_sender"         sender-side bookkeeping (predicted t_ε, assignment
+  //                     diagnostics, cancelled tail bytes, socket_sndbuf).
+  //   "_aggregation"    the aggregator's per-round slippage realization.
+  //   "_receiver_flows" transport-level first/last-byte stamps per
+  //                     (source, payload type) — the ONLY receiver clock for
+  //                     manifest-less flows: the monolithic ModelUpdate and
+  //                     the aggregator's downlink broadcast (audit NT-05).
+  //   "_clock_domains"  the suffix legend plus this round's count of negative
+  //                     one-way values (nonzero ⇒ the shared-clock premise
+  //                     does not hold and `_oneway_s` must not be used).
+  string uplink_telemetry_json = 15;
+  // Divergence marker (audit ML-04).  True when this node's round produced a
+  // non-finite train loss, val loss, or model weight — the failure mode that
+  // otherwise reports as ORDINARY DATA: NaN logits make tf.argmax return
+  // class 0, so a collapsed CIFAR-10 run emits val_accuracy = 0.100 (chance)
+  // with a NaN val_loss and every downstream mean accepts it.  The run is NOT
+  // aborted (collapse studies need the trajectory); the marker is the gate
+  // analyses must read before using a round's accuracy or byte counts.
+  // `diverged_reason` names the first check that failed, e.g.
+  // "train_loss=nan", "val_loss=nan", "non_finite_weights:conv_1/kernel",
+  // "non_finite_importance:conv_2/kernel".
+  bool diverged = 16;
+  string diverged_reason = 17;
+}
+
+message LayerCommMetric {
+  string layer_name = 1;
+  // Per-layer kernel-accept (enqueue) duration on the layer's class socket —
+  // same MEASUREMENT WARNING as MetricsReport.send_duration_s above (audit
+  // NT-01): buffer acceptance, sender clock domain, NOT wire time.  Name and
+  // number frozen for wire compatibility; exported as
+  // `send_enqueue_duration_sender_s`.  The layer's wire time is the
+  // receiver-side `layer_wire_times_oneway_s` entry in uplink_telemetry_json.
+  float send_duration_s = 2;
+  float importance = 3;
+  uint32 traffic_class = 4;
+  uint64 bytes_sent = 5;
+}
+
+// --- Control ---
+message ControlSignal {
+  enum Action {
+    START_TRAINING = 0;
+    STOP_TRAINING = 1;
+    SHUTDOWN = 2;
+  }
+  Action action = 1;
+}

@@ -1,0 +1,4 @@
+concurrent	0	clip_mono	41	configs/experiments/diag/clip_mono/seed41.yaml
+concurrent	0	clip_aging	42	configs/experiments/diag/clip_aging/seed42.yaml
+concurrent	0	lr005_mono	41	configs/experiments/diag/lr005_mono/seed41.yaml
+concurrent	0	lr005_aging	42	configs/experiments/diag/lr005_aging/seed42.yaml

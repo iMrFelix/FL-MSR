@@ -1,0 +1,15 @@
+serial	t0	cyclic_k7	41	configs/experiments/fedluar_rescue/cyclic_k7/seed41.yaml
+serial	t0	fedluar_d6	41	configs/experiments/fedluar_rescue/fedluar_d6/seed41.yaml
+serial	t0	fedluar_d7	41	configs/experiments/fedluar_rescue/fedluar_d7/seed41.yaml
+serial	t0	fedluar_d7	43	configs/experiments/fedluar_rescue/fedluar_d7/seed43.yaml
+serial	t0	fedluar_d7	45	configs/experiments/fedluar_rescue/fedluar_d7/seed45.yaml
+serial	t0	fedluar_d7	46	configs/experiments/fedluar_rescue/fedluar_d7/seed46.yaml
+serial	t0	fedluar_d9	41	configs/experiments/fedluar_rescue/fedluar_d9/seed41.yaml
+serial	t0	improute_tau2	41	configs/experiments/fedluar_rescue/improute_tau2/seed41.yaml
+serial	t0	improute_tau5	41	configs/experiments/fedluar_rescue/improute_tau5/seed41.yaml
+serial	t0	improute_tau5	43	configs/experiments/fedluar_rescue/improute_tau5/seed43.yaml
+serial	t0	improute_tau8	41	configs/experiments/fedluar_rescue/improute_tau8/seed41.yaml
+serial	t0	luarand_d11	41	configs/experiments/fedluar_rescue/luarand_d11/seed41.yaml
+serial	t0	luarand_d9	41	configs/experiments/fedluar_rescue/luarand_d9/seed41.yaml
+serial	t0	luarand_d9	43	configs/experiments/fedluar_rescue/luarand_d9/seed43.yaml
+serial	t0	luarcyc_d7	46	configs/experiments/fedluar_rescue/luarcyc_d7/seed46.yaml

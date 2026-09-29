@@ -1,0 +1,15 @@
+serial	0	mono	41	configs/experiments/timing/mono/seed41.yaml
+serial	0	mono	42	configs/experiments/timing/mono/seed42.yaml
+serial	0	mono	43	configs/experiments/timing/mono/seed43.yaml
+serial	0	eps0	41	configs/experiments/timing/eps0/seed41.yaml
+serial	0	eps0	42	configs/experiments/timing/eps0/seed42.yaml
+serial	0	eps0	43	configs/experiments/timing/eps0/seed43.yaml
+serial	0	eps02	41	configs/experiments/timing/eps02/seed41.yaml
+serial	0	eps02	42	configs/experiments/timing/eps02/seed42.yaml
+serial	0	eps02	43	configs/experiments/timing/eps02/seed43.yaml
+serial	0	eps03	41	configs/experiments/timing/eps03/seed41.yaml
+serial	0	eps03	42	configs/experiments/timing/eps03/seed42.yaml
+serial	0	eps03	43	configs/experiments/timing/eps03/seed43.yaml
+serial	0	eps04	41	configs/experiments/timing/eps04/seed41.yaml
+serial	0	eps04	42	configs/experiments/timing/eps04/seed42.yaml
+serial	0	eps04	43	configs/experiments/timing/eps04/seed43.yaml

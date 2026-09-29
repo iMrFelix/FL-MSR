@@ -1,0 +1,27 @@
+FROM python:3.11-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY pyproject.toml .
+RUN pip install --no-cache-dir . 2>/dev/null || pip install --no-cache-dir \
+    "tensorflow>=2.15,<3.0" \
+    "protobuf>=4.25,<5.0" \
+    "pyyaml>=6.0" \
+    "pydantic>=2.5" \
+    "numpy>=1.24" \
+    "tensorboard>=2.15"
+
+# Copy source code
+COPY proto/ proto/
+COPY src/ src/
+
+# Compile protobuf
+RUN protoc -I=proto --python_out=src/proto_gen proto/federation.proto
+
+# Monitor entry point
+CMD ["python", "-m", "src.monitoring.monitor_main"]

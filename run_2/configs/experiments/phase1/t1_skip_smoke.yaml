@@ -1,0 +1,109 @@
+# Phase 1 / T1 validation (b) — container-level 2-round wire smoke.
+#
+# PM gate-1 required fix 3: docker compose run with skip_feedback='fedluar'
+# + late_layer_policy='recycle_last_delta', after the schema/generator
+# skip keys landed (they did — TrainingConfig.skip_feedback /
+# skip_fedluar_count + generate_node_configs passthrough).
+#
+# Topology and grid identical to prelim_perlayer_eps0.yaml (4 nodes,
+# 1 aggregator + 3 workers, 6/3/1 Mbps per-class shaping) so the wire
+# path matches the validated per-layer smoke arm.  2 rounds is the
+# minimal advice cycle: round 0 transmits everything and produces the
+# fedluar advice after aggregation; round 1 realizes the omission.
+#
+# Pass criteria (plan.md T1 VALIDATE b), checked host-side against
+# report.json:
+#   - skip advice observed: aggregator round-0 _aggregation.skip_advice
+#     present, same global set for all 3 workers, exactly
+#     skip_fedluar_count layers;
+#   - bytes actually absent: round-1 worker layer_comm_metrics lack the
+#     advised layers while round 0 carried all 14; aggregator round-1
+#     per-flow telemetry shows skip_omitted_layers (manifest skip flags)
+#     on every worker flow;
+#   - recycle fill realized: round-1 _aggregation block shows
+#     filled='recycle' with empty arrived_sources for the advised layers;
+#   - accuracy sane: every val_accuracy finite in [0,1], train_loss
+#     finite (2 CIFAR-10 rounds sit near the 0.1 random floor — sanity,
+#     not a learning claim).
+
+federation:
+  num_nodes: 4
+  roles:
+    0: aggregator
+
+  topology:
+    edges:
+      # Worker 1 <-> Aggregator
+      - src: 1
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 1
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 2 <-> Aggregator
+      - src: 2
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 2
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 3 <-> Aggregator
+      - src: 3
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 3
+        classes:
+          0: { bandwidth_mbps: 6, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 3, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 1, latency_ms: 5, drop_rate: 0.0 }
+
+traffic_classes:
+  num_classes: 3
+  dscp_mapping:
+    0: 46   # EF
+    1: 10   # AF11
+    2: 0    # Best-effort
+
+training:
+  dataset:
+    name: cifar10
+    partition:
+      strategy: iid
+      seed: 42
+  model: deep_cnn
+  algorithm: fedavg
+  epochs_per_round: 1
+  total_rounds: 2
+  batch_size: 64
+  learning_rate: 0.01
+  optimizer: sgd
+  sync_timeout: 120.0
+  update_mode: per_layer
+  epsilon_deadline: 0.2
+  epsilon_warmup_rounds: 0
+  importance_metric_v2: delta_sq_norm
+  assignment_strategy: byte_balanced
+  late_layer_policy: recycle_last_delta
+  skip_feedback: fedluar
+  skip_fedluar_count: 2
+  watchdog_factor: 3.0
+
+monitoring:
+  tensorboard: false
+  report_output: ./results/

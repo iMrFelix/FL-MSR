@@ -1,0 +1,132 @@
+federation:
+  num_nodes: 4
+  roles:
+    0: aggregator
+  topology:
+    edges:
+    - classes:
+        0:
+          bandwidth_mbps: 6
+          drop_rate: 0.0
+          latency_ms: 5
+        1:
+          bandwidth_mbps: 3
+          drop_rate: 0.0
+          latency_ms: 5
+        2:
+          bandwidth_mbps: 1
+          drop_rate: 0.0
+          latency_ms: 5
+      dst: 0
+      src: 1
+    - classes:
+        0:
+          bandwidth_mbps: 6
+          drop_rate: 0.0
+          latency_ms: 5
+        1:
+          bandwidth_mbps: 3
+          drop_rate: 0.0
+          latency_ms: 5
+        2:
+          bandwidth_mbps: 1
+          drop_rate: 0.0
+          latency_ms: 5
+      dst: 1
+      src: 0
+    - classes:
+        0:
+          bandwidth_mbps: 6
+          drop_rate: 0.0
+          latency_ms: 5
+        1:
+          bandwidth_mbps: 3
+          drop_rate: 0.0
+          latency_ms: 5
+        2:
+          bandwidth_mbps: 1
+          drop_rate: 0.0
+          latency_ms: 5
+      dst: 0
+      src: 2
+    - classes:
+        0:
+          bandwidth_mbps: 6
+          drop_rate: 0.0
+          latency_ms: 5
+        1:
+          bandwidth_mbps: 3
+          drop_rate: 0.0
+          latency_ms: 5
+        2:
+          bandwidth_mbps: 1
+          drop_rate: 0.0
+          latency_ms: 5
+      dst: 2
+      src: 0
+    - classes:
+        0:
+          bandwidth_mbps: 6
+          drop_rate: 0.0
+          latency_ms: 5
+        1:
+          bandwidth_mbps: 3
+          drop_rate: 0.0
+          latency_ms: 5
+        2:
+          bandwidth_mbps: 1
+          drop_rate: 0.0
+          latency_ms: 5
+      dst: 0
+      src: 3
+    - classes:
+        0:
+          bandwidth_mbps: 6
+          drop_rate: 0.0
+          latency_ms: 5
+        1:
+          bandwidth_mbps: 3
+          drop_rate: 0.0
+          latency_ms: 5
+        2:
+          bandwidth_mbps: 1
+          drop_rate: 0.0
+          latency_ms: 5
+      dst: 3
+      src: 0
+monitoring:
+  report_output: ./results/
+  tensorboard: true
+  tensorboard_port: 6006
+traffic_classes:
+  dscp_mapping:
+    0: 46
+    1: 10
+    2: 0
+  num_classes: 3
+training:
+  aging_lambda: 0.5
+  aging_mode: additive_capped
+  aging_tau_max: 3
+  algorithm: fedavg
+  assignment_strategy: coverage_eft
+  batch_size: 64
+  cyclic_k: 0
+  dataset:
+    name: cifar10
+    partition:
+      seed: 43
+      strategy: iid
+  epochs_per_round: 1
+  epsilon_deadline: 0.49
+  epsilon_warmup_rounds: 0
+  importance_metric: gradient_norm
+  importance_metric_v2: delta_sq_norm
+  late_layer_policy: recycle_last_delta
+  learning_rate: 0.01
+  model: deep_cnn
+  optimizer: sgd
+  sync_timeout: 120.0
+  total_rounds: 10
+  update_mode: per_layer
+  watchdog_factor: 3.0

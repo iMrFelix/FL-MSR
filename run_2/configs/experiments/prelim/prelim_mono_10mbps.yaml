@@ -1,0 +1,77 @@
+# Prelim — Monolithic reference, 10 Mbps per edge (identical to exp4).
+#
+# Reference baseline for the ε-deadline preliminary.  Monolithic mode
+# does not interact with ε or the manifest; this run establishes
+# "what would happen if we sent the entire model in one envelope".
+# See docs/experiments/01-epsilon-deadline-prelim.md.
+#
+# Experiment 4 — Monolithic updates, 10 Mbps per edge (Part 2 reference)
+#
+# Identical to exp1 but kept as a separate file so Part 2 comparisons can
+# reference a co-located baseline.  All three Part 2 experiments (exp4, exp5,
+# exp6) use an equal total bandwidth of 6+3+1 = 10 Mbps per edge.
+#
+# Monolithic: entire model (≈ 731 KB) sent as a single blob on a 10 Mbps link.
+# Expected comm time ≈ 0.59 s/direction.
+
+federation:
+  num_nodes: 4
+  roles:
+    0: aggregator
+
+  topology:
+    edges:
+      # Worker 1 ↔ Aggregator
+      - src: 1
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 1
+        classes:
+          0: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 2 ↔ Aggregator
+      - src: 2
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 2
+        classes:
+          0: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 3 ↔ Aggregator
+      - src: 3
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 3
+        classes:
+          0: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+
+traffic_classes:
+  num_classes: 1
+  dscp_mapping:
+    0: 0
+
+training:
+  dataset:
+    name: cifar10
+    partition:
+      strategy: iid
+      seed: 42
+  model: deep_cnn
+  algorithm: fedavg
+  epochs_per_round: 1
+  total_rounds: 10
+  batch_size: 64
+  learning_rate: 0.01
+  optimizer: sgd
+  sync_timeout: 120.0
+  update_mode: monolithic
+  importance_metric: null
+
+monitoring:
+  tensorboard: true
+  tensorboard_port: 6006
+  report_output: ./results/

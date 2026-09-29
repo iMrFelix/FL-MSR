@@ -1,0 +1,32 @@
+[project]
+name = "fed-emulator"
+version = "0.1.0"
+description = "Federated and Decentralized Federated Learning Emulator Framework"
+requires-python = ">=3.11"
+dependencies = [
+    "tensorflow>=2.15,<3.0",
+    "protobuf>=4.25,<5.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.5",
+    "numpy>=1.24",
+    "tensorboard>=2.15",
+    "docker>=7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

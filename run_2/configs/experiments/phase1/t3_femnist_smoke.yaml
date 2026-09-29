@@ -1,0 +1,105 @@
+# Phase 1 / T3 validation (c): FEMNIST 2-round 4-node smoke.
+#
+# LEAF FEMNIST (natural per-writer partition) + the FedLUAR 4-layer CNN
+# ('femnist_cnn', 6,603,710 params ≈ 25.2 MiB/update — dense_0/kernel
+# alone is 97.3% of the bytes, the single-dominant-layer regime).
+# Hyper-parameters per FedLUAR Table 6 (FEMNIST CNN): batch 20, lr 0.01,
+# SGD.  Pass criteria (plan.md T3c): trains, manifests flow (uplink
+# telemetry on all 6 source-round flows), val accuracy > 1/62 by round 2.
+#
+# PARTITION: 'natural' (canonical LEAF writers-to-nodes assignment) is
+# a first-class schema literal; writer subsampling is the first-class
+# partition.max_writers knob.  max_writers: 40 keeps the smoke fast
+# (seeded writer subsample, LEAF "small"-style); drop the key for
+# full-data runs.  Provenance lands in <data_dir>/femnist_partition.json.
+# Run:  python -m scripts.run --config configs/experiments/phase1/t3_femnist_smoke.yaml
+#
+# Bandwidths are 10x the DeepCNN prelim grid (60/30/10 vs 6/3/1 Mbps)
+# because the model is ~35x larger; the dense kernel (24.5 MiB =
+# 205.6 Mbit) drains in ~3.4 s on class 0.
+
+federation:
+  num_nodes: 4
+  roles:
+    0: aggregator
+  topology:
+    edges:
+      # Worker 1 <-> Aggregator
+      - src: 1
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 1
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 2 <-> Aggregator
+      - src: 2
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 2
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 3 <-> Aggregator
+      - src: 3
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 3
+        classes:
+          0: { bandwidth_mbps: 60, latency_ms: 5, drop_rate: 0.0 }
+          1: { bandwidth_mbps: 30, latency_ms: 5, drop_rate: 0.0 }
+          2: { bandwidth_mbps: 10, latency_ms: 5, drop_rate: 0.0 }
+
+traffic_classes:
+  num_classes: 3
+  dscp_mapping:
+    0: 46   # EF
+    1: 10   # AF11
+    2: 0    # Best-effort
+
+training:
+  dataset:
+    name: femnist
+    partition:
+      strategy: natural   # canonical LEAF writers-to-nodes partition
+      seed: 42
+      max_writers: 40     # seeded writer subsample for smoke speed
+  model: femnist_cnn
+  algorithm: fedavg
+  epochs_per_round: 1
+  total_rounds: 2
+  batch_size: 20          # FedLUAR Table 6 (FEMNIST CNN)
+  learning_rate: 0.01     # FedLUAR Table 6 (FEMNIST CNN)
+  optimizer: sgd
+  sync_timeout: 300.0     # 25 MiB updates need headroom over DeepCNN
+  update_mode: per_layer
+  importance_metric: gradient_norm
+  importance_metric_v2: delta_sq_norm
+  assignment_strategy: coverage_eft
+  epsilon_deadline: 0.1
+  epsilon_warmup_rounds: 0
+  aging_mode: none
+  aging_lambda: 0.0
+  aging_tau_max: 0
+  cyclic_k: 0
+  late_layer_policy: recycle_last_delta
+  watchdog_factor: 3.0
+
+monitoring:
+  report_output: ./results/
+  tensorboard: false
+  tensorboard_port: 6006

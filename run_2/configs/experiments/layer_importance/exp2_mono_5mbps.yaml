@@ -1,0 +1,69 @@
+# Experiment 2 — Monolithic updates, 5 Mbps per edge
+#
+# Part 1: bandwidth-sensitivity study.
+# Model size ≈ 731 KB → expected comm time ≈ 1.17 s/direction.
+# Expected round time ≈ 10–12 s training + 2×1.17 s ≈ 12–14 s.
+# 20 rounds ≈ 4–5 minutes.
+# Compare comm_duration_s with exp1 to observe the 2× bandwidth reduction.
+
+federation:
+  num_nodes: 4
+  roles:
+    0: aggregator
+
+  topology:
+    edges:
+      # Worker 1 ↔ Aggregator
+      - src: 1
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 5, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 1
+        classes:
+          0: { bandwidth_mbps: 5, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 2 ↔ Aggregator
+      - src: 2
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 5, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 2
+        classes:
+          0: { bandwidth_mbps: 5, latency_ms: 5, drop_rate: 0.0 }
+      # Worker 3 ↔ Aggregator
+      - src: 3
+        dst: 0
+        classes:
+          0: { bandwidth_mbps: 5, latency_ms: 5, drop_rate: 0.0 }
+      - src: 0
+        dst: 3
+        classes:
+          0: { bandwidth_mbps: 5, latency_ms: 5, drop_rate: 0.0 }
+
+traffic_classes:
+  num_classes: 1
+  dscp_mapping:
+    0: 0
+
+training:
+  dataset:
+    name: cifar10
+    partition:
+      strategy: iid
+      seed: 42
+  model: deep_cnn
+  algorithm: fedavg
+  epochs_per_round: 1
+  total_rounds: 10
+  batch_size: 64
+  learning_rate: 0.01
+  optimizer: sgd
+  sync_timeout: 120.0
+  update_mode: monolithic
+  importance_metric: null
+
+monitoring:
+  tensorboard: true
+  tensorboard_port: 6006
+  report_output: ./results/

@@ -1,0 +1,36 @@
+FROM python:3.11-slim
+
+# GPU variant of Dockerfile.node. Identical contract, two differences:
+#   * tensorflow[and-cuda] — the pip extra ships CUDA/cuDNN userspace libs,
+#     so no nvidia/cuda base image is needed; the NVIDIA container runtime
+#     injects the driver at `docker run --gpus ...`.
+#   * nothing else: iproute2/tc, protobuf, src layout stay the same.
+# NOTE (review M6): the launcher does NOT yet use this image — its compose
+# generation hard-codes fl-node:latest (src/config/generator.py:39) and
+# build_images() rebuilds fl-node:latest from the CPU Dockerfile on every
+# scripts.run, so retagging this image would be overwritten. Wiring the
+# framework to GPU images + per-node GPU device requests is an explicit
+# step-3 engineering item; until then this image serves the probe stage only.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        iproute2 \
+        protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY pyproject.toml .
+RUN pip install --no-cache-dir \
+    "tensorflow[and-cuda]>=2.15,<3.0" \
+    "protobuf>=4.25,<5.0" \
+    "pyyaml>=6.0" \
+    "pydantic>=2.5" \
+    "numpy>=1.24" \
+    "tensorboard>=2.15"
+
+COPY proto/ proto/
+COPY src/ src/
+
+RUN protoc -I=proto --python_out=src/proto_gen proto/federation.proto
+
+CMD ["python", "-m", "src.node"]

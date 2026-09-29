@@ -1,0 +1,4 @@
+concurrent	0	r50a	41	configs/experiments/detprobe/r50a/seed41.yaml
+concurrent	0	r50b	41	configs/experiments/detprobe/r50b/seed41.yaml
+concurrent	0	r20a	41	configs/experiments/detprobe/r20a/seed41.yaml
+concurrent	0	r20b	41	configs/experiments/detprobe/r20b/seed41.yaml

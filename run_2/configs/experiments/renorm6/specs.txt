@@ -1,0 +1,4 @@
+concurrent	0	sentinel41	41	configs/experiments/renorm6/sentinel41/seed41.yaml
+concurrent	0	renormalize_eps03	44	configs/experiments/renorm6/renormalize_eps03/seed44.yaml
+concurrent	0	renormalize_eps03	45	configs/experiments/renorm6/renormalize_eps03/seed45.yaml
+concurrent	0	renormalize_eps03	46	configs/experiments/renorm6/renormalize_eps03/seed46.yaml
